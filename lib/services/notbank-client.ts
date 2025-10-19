@@ -1,5 +1,11 @@
 import { MarketData, Portfolio, Position, Trade } from "@/lib/types";
-import { NotbankPosition, NotbankAccountInfo, NotbankOrderBook, NotbankTicker, NotbankOrder } from "@/lib/types/notbank";
+import {
+  NotbankAccountInfo,
+  NotbankOrder,
+  NotbankOrderBook,
+  NotbankPosition,
+  NotbankTicker,
+} from "@/lib/types/notbank";
 import { NotbankClient } from "notbank";
 
 export class NotbankTradingClient {
@@ -10,13 +16,19 @@ export class NotbankTradingClient {
   private apiPublicKey: string;
   private apiSecretKey: string;
   private userId: string;
-  private accountId: number = 0;
+  private accountId: number;
   private isAuthenticated: boolean = false;
 
-  constructor(apiPublicKey: string, apiSecretKey: string, userId: string = "") {
+  constructor(
+    apiPublicKey: string,
+    apiSecretKey: string,
+    userId: string = "",
+    accountId?: number
+  ) {
     this.apiPublicKey = apiPublicKey;
     this.apiSecretKey = apiSecretKey;
     this.userId = userId;
+    this.accountId = accountId || 0; // Will be set during auth if not provided
     this.client = NotbankClient.Factory.createRestClient();
   }
 
@@ -34,22 +46,26 @@ export class NotbankTradingClient {
       this.tradingService = this.client.getTradingService();
       this.instrumentService = this.client.getInstrumentService();
 
-      // Get user info to find the account ID
-      try {
-        const userInfo = await this.client.getUserInfo();
-        console.log("User info:", userInfo);
+      // Use provided account ID or try to get it from user info
+      if (!this.accountId) {
+        try {
+          const userInfo = await this.client.getUserInfo();
+          console.log("User info:", userInfo);
 
-        if (userInfo && userInfo.AccountId) {
-          this.accountId = userInfo.AccountId;
-        } else {
-          // Try to get account info as fallback
-          const accountInfo = await this.accountService.getAccountInfo();
-          console.log("Account info from getAccountInfo:", accountInfo);
-          this.accountId = accountInfo.AccountId || 51857; // Use your known AccountId as fallback
+          if (userInfo && userInfo.AccountId) {
+            this.accountId = userInfo.AccountId;
+          } else {
+            // Try to get account info as fallback
+            const accountInfo = await this.accountService.getAccountInfo();
+            console.log("Account info from getAccountInfo:", accountInfo);
+            this.accountId = accountInfo.AccountId;
+          }
+        } catch (err) {
+          console.log("Error getting account info:", err);
+          throw new Error(
+            "Account ID is required. Please provide NOTBANK_ACCOUNT_ID in environment variables."
+          );
         }
-      } catch (err) {
-        console.log("Could not get user/account info, using default AccountId");
-        this.accountId = 51857; // Your account ID from the response you showed
       }
 
       console.log("Using AccountId:", this.accountId);
@@ -113,16 +129,16 @@ export class NotbankTradingClient {
 
     try {
       // Get all positions including pending
-      const allPositions: NotbankPosition[] = await this.accountService.getAccountPositions({
-        AccountId: this.accountId,
-        IncludePending: true,
-      });
+      const allPositions: NotbankPosition[] =
+        await this.accountService.getAccountPositions({
+          AccountId: this.accountId,
+          IncludePending: true,
+        });
 
       // Find USD/USDT position for cash balance (not crypto with USD notional)
       const cashPosition = allPositions.find(
         (position: NotbankPosition) =>
-          position.ProductSymbol === "USD" ||
-          position.ProductSymbol === "USDT"
+          position.ProductSymbol === "USD" || position.ProductSymbol === "USDT"
       );
 
       console.log("cashPosition", cashPosition);
@@ -159,14 +175,17 @@ export class NotbankTradingClient {
 
           // Calculate average entry price from the start of day balance
           // If we don't have start of day, estimate from current values
-          const averagePrice = pos.StartOfDayBalanceNotional > 0 && quantity > 0
-            ? pos.StartOfDayBalanceNotional / quantity
-            : currentPrice;
+          const averagePrice =
+            pos.StartOfDayBalanceNotional > 0 && quantity > 0
+              ? pos.StartOfDayBalanceNotional / quantity
+              : currentPrice;
 
           // P&L calculation
-          const pnl = currentNotionalValue - (quantity * averagePrice);
+          const pnl = currentNotionalValue - quantity * averagePrice;
           const pnlPercent =
-            averagePrice > 0 && quantity > 0 ? (pnl / (quantity * averagePrice)) * 100 : 0;
+            averagePrice > 0 && quantity > 0
+              ? (pnl / (quantity * averagePrice)) * 100
+              : 0;
 
           return {
             symbol,
@@ -266,22 +285,41 @@ export class NotbankTradingClient {
     await this.authenticate();
 
     try {
+      // Use correct parameters based on GetOrdersHistoryRequest interface
       const orders = await this.tradingService.getOrderHistory({
         AccountId: this.accountId,
-        Count: limit,
       });
 
+      console.log("Fetched orders:", orders);
+
+      // Handle case where no orders are returned
+      if (!orders || !Array.isArray(orders)) {
+        console.log("No orders found");
+        return [];
+      }
+
       return orders
-        .filter((order: any) => order.OrderState === "FullyExecuted")
-        .map((order: any) => ({
-          id: order.OrderId.toString(),
-          symbol: order.InstrumentSymbol || order.Symbol,
-          side: order.Side === 0 ? "buy" : "sell",
-          price: order.Price || order.AveragePrice,
-          quantity: order.Quantity,
-          notional: order.Quantity * (order.Price || order.AveragePrice),
+        .filter((order: NotbankOrder) => {
+          const state = order.OrderState;
+          return (
+            state === "FullyExecuted" ||
+            state === "Filled" ||
+            state === 3 || // Numeric state for FullyExecuted
+            state === "3" // String version of numeric state
+          );
+        })
+        .map((order: NotbankOrder) => ({
+          id: order.OrderId?.toString() || Date.now().toString(),
+          symbol: order.InstrumentSymbol || order.Symbol || "UNKNOWN",
+          side: order.Side === 0 ? ("buy" as const) : ("sell" as const),
+          price: order.Price || order.AveragePrice || 0,
+          quantity: order.Quantity || 0,
+          notional:
+            (order.Quantity || 0) * (order.Price || order.AveragePrice || 0),
           fee: order.OrderFee || 0,
-          timestamp: new Date(order.ReceiveTime),
+          timestamp: order.ReceiveTime
+            ? new Date(order.ReceiveTime)
+            : new Date(),
           status: "completed" as const,
         }));
     } catch (error) {

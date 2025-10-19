@@ -24,7 +24,8 @@ export async function POST(req: NextRequest) {
     const tradingClient = new NotbankTradingClient(
       process.env.NOTBANK_API_PUBLIC_KEY,
       process.env.NOTBANK_API_SECRET_KEY,
-      process.env.NOTBANK_USER_ID || ''
+      process.env.NOTBANK_USER_ID || '',
+      process.env.NOTBANK_ACCOUNT_ID ? parseInt(process.env.NOTBANK_ACCOUNT_ID) : undefined
     )
 
     const marketData = await tradingClient.getMarketData(symbols || ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'])

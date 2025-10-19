@@ -13,7 +13,8 @@ export async function GET(req: NextRequest) {
     const tradingClient = new NotbankTradingClient(
       process.env.NOTBANK_API_PUBLIC_KEY,
       process.env.NOTBANK_API_SECRET_KEY,
-      process.env.NOTBANK_USER_ID || ''
+      process.env.NOTBANK_USER_ID || '',
+      process.env.NOTBANK_ACCOUNT_ID ? parseInt(process.env.NOTBANK_ACCOUNT_ID) : undefined
     )
 
     const portfolio = await tradingClient.getPortfolio()
